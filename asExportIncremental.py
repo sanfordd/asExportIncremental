@@ -4,7 +4,6 @@ import os, requests, json, sys, time, pickle, logging, ConfigParser, re, subproc
 from lxml import etree
 from requests_toolbelt import exceptions
 from requests_toolbelt.downloadutils import stream
-from gittle import Gittle
 
 # local config file, containing variables
 configFilePath = 'local_settings.cfg'
@@ -20,29 +19,21 @@ lastExportFilepath = config.get('LastExport', 'filepath')
 exportUnpublished = config.get('EADexport', 'exportUnpublished')
 exportDaos = config.get('EADexport', 'exportDaos')
 exportNumbered = config.get('EADexport', 'exportNumbered')
-exportPdf = config.get('EADexport', 'exportPdf')
 # ResourceID lists (to be populated by ids of exported or deleted records)
 resourceExportList = []
 resourceDeleteList = []
 doExportList = []
 doDeleteList = []
 # EAD to PDF export utility filePath
-PDFConvertFilepath = config.get('PDFexport', 'filepath')
 # EAD to MODS XSL filepath
-MODSxsl = config.get('MODSexport', 'filepath')
 # Logging configuration
 logging.basicConfig(filename=config.get('Logging', 'filename'),format=config.get('Logging', 'format', 1), datefmt=config.get('Logging', 'datefmt', 1), level=config.get('Logging', 'level', 0))
 # Sets logging of requests to WARNING to avoid unneccessary info
 logging.getLogger("requests").setLevel(logging.WARNING)
-# Adds randomly generated commit message from external text file
-commitMessage = line = random.choice(open(config.get('Git', 'commitMessageData')).readlines());
 
 # export destinations, os.path.sep makes these absolute URLs
 dataDestination = config.get('Destinations', 'dataDestination')
 EADdestination = config.get('Destinations', 'EADdestination')
-METSdestination = config.get('Destinations', 'METSdestination')
-MODSdestination = config.get('Destinations', 'MODSdestination')
-PDFdestination = config.get('Destinations', 'PDFdestination')
 
 # file path to record process id
 pidfilepath = 'daemon.pid'
@@ -64,7 +55,7 @@ def checkPid(pidfilepath):
         file(pidfilepath, 'w').write(currentPid)
 
 def makeDestinations():
-    destinations = [EADdestination, PDFdestination, METSdestination]
+    destinations = [EADdestination]
     for d in destinations:
         if not os.path.exists(d):
             os.makedirs(d)
@@ -104,19 +95,6 @@ def updateTime(exportStartTime):
         pickle.dump(exportStartTime, pickle_handle)
         logging.info('Last export time updated to ' + str(exportStartTime))
 
-# Create MODS files using XSLT
-def EADtoMODS(resourceID, ead, headers):
-    if not os.path.exists(os.path.join(MODSdestination,resourceID)):
-        os.makedirs(os.path.join(MODSdestination,resourceID))
-    filePath = os.path.join(MODSdestination,resourceID,resourceID+'.xml')
-    parser = etree.XMLParser(resolve_entities=False, strip_cdata=False, remove_blank_text=True)
-    document = etree.parse(ead, parser)
-    xslt = etree.parse(MODSxsl)
-    transform = etree.XSLT(xslt)
-    mods = transform(document)
-    mods.write(filePath, pretty_print=True, encoding='utf-8')
-    logging.info('%s.xml created at %s', resourceID, os.path.join(MODSdestination,resourceID))
-
 # formats XML files
 def prettyPrintXml(filePath, resourceID, headers):
     assert filePath is not None
@@ -129,17 +107,10 @@ def prettyPrintXml(filePath, resourceID, headers):
         else:
             document = etree.parse(filePath, parser)
             document.write(filePath, pretty_print=True, encoding='utf-8')
-            createPDF(resourceID)
+#            createPDF(resourceID)
     except:
         logging.warning('%s is invalid and will be removed', resourceID)
         removeFile(resourceID, EADdestination)
-
-# creates pdf from EAD
-def createPDF(resourceID):
-    if not os.path.exists(os.path.join(PDFdestination,resourceID)):
-        os.makedirs(os.path.join(PDFdestination,resourceID))
-    subprocess.call(['java', '-jar', PDFConvertFilepath, os.path.join(EADdestination, resourceID, resourceID+'.xml'), os.path.join(PDFdestination, resourceID, resourceID+'.pdf')])
-    logging.info('%s.pdf created at %s', resourceID, os.path.join(PDFdestination,resourceID))
 
 # Exports EAD file
 def exportEAD(resourceID, identifier, headers):
@@ -147,7 +118,7 @@ def exportEAD(resourceID, identifier, headers):
         os.makedirs(os.path.join(EADdestination,resourceID))
     try:
         with open(os.path.join(EADdestination,resourceID,resourceID+'.xml'), 'wb') as fd:
-            ead = requests.get(repositoryBaseURL+'resource_descriptions/'+str(identifier)+'.xml?include_unpublished={exportUnpublished}&include_daos={exportDaos}&numbered_cs={exportNumbered}&print_pdf={exportPdf}'.format(exportUnpublished=exportUnpublished, exportDaos=exportDaos, exportNumbered=exportNumbered, exportPdf=exportPdf), headers=headers, stream=True)
+            ead = requests.get(repositoryBaseURL+'resource_descriptions/'+str(identifier)+'.xml?include_unpublished={exportUnpublished}&include_daos={exportDaos}'.format(exportUnpublished=exportUnpublished, exportDaos=exportDaos), headers=headers, stream=True)
             filename = stream.stream_response_to_file(ead, path=fd)
             fd.close
             logging.info('%s.xml exported to %s', resourceID, os.path.join(EADdestination,resourceID))
@@ -156,21 +127,6 @@ def exportEAD(resourceID, identifier, headers):
         logging.warning(e.message)
     #validate here
     prettyPrintXml(os.path.join(EADdestination,resourceID,resourceID+'.xml'), resourceID, headers)
-
-# Exports METS file
-def exportMETS(doID, d, headers):
-    if not os.path.exists(os.path.join(METSdestination,doID)):
-        os.makedirs(os.path.join(METSdestination,doID))
-    try:
-        with open(os.path.join(METSdestination,doID,doID+'.xml'), 'wb') as fd:
-            mets = requests.get(repositoryBaseURL+'digital_objects/mets/'+str(d)+'.xml', headers=headers, stream=True)
-            filename = stream.stream_response_to_file(mets, path=fd)
-            fd.close
-            logging.info('%s.xml exported to %s', doID, os.path.join(METSdestination,doID))
-            doExportList.append(doID)
-    except exceptions.StreamingError as e:
-        logging.warning(e.message)
-    #validate here
 
 # Deletes EAD file if it exists
 def removeFile(identifier, destination):
@@ -199,9 +155,8 @@ def handleDigitalObject(digital_object, d, headers):
     doID = digital_object["digital_object_id"]
     try:
         digital_object["publish"]
-        exportMETS(doID, d, headers)
     except:
-        removeFile(doID, METSdestination)
+        removeFile(doID)
 
 def handleAssociatedDigitalObject(digital_object, resourceId, d, headers):
     doID = digital_object["digital_object_id"]
@@ -213,37 +168,8 @@ def handleAssociatedDigitalObject(digital_object, resourceId, d, headers):
         else:
             resourceRef = component["resource"]["ref"]
         resource = resource = (requests.get(baseURL + resourceRef, headers=headers)).json()
-        if resource["id_0"] == resourceId:
-            exportMETS(doID, d, headers)
     except:
-        removeFile(doID, METSdestination)
-
-# Looks for all resource records starting with "LI"
-def findAllLibraryResources(headers):
-    resourceIds = requests.get(repositoryBaseURL+'resources?all_ids=true', headers=headers)
-    logging.info('*** Getting a list of all resources ***')
-    for r in resourceIds.json():
-        resource = (requests.get(repositoryBaseURL+'resources/' + str(r), headers=headers)).json()
-        if 'LI' in resource["id_0"]:
-            handleResource(resource, headers)
-
-# Looks for a specific resource record using id_0
-def findResource(headers, resourceId):
-    resourceIds = requests.get(repositoryBaseURL+'resources?all_ids=true', headers=headers)
-    logging.info('*** Getting a list of all resources ***')
-    for r in resourceIds.json():
-        resource = (requests.get(repositoryBaseURL+'resources/' + str(r), headers=headers)).json()
-        if resourceId in resource["id_0"]:
-            handleResource(resource, headers)
-
-# Looks for all resource records not starting with "LI"
-def findAllArchivalResources(headers):
-    resourceIds = requests.get(repositoryBaseURL+'resources?all_ids=true', headers=headers)
-    logging.info('*** Getting a list of all resources ***')
-    for r in resourceIds.json():
-        resource = (requests.get(repositoryBaseURL+'resources/' + str(r), headers=headers)).json()
-        if not 'LI' in resource["id_0"]:
-            handleResource(resource, headers)
+        removeFile(doID)
 
 # Looks for updated resources
 def findUpdatedResources(lastExport, headers):
@@ -296,17 +222,6 @@ def gitPull():
         repo = Gittle(d, origin_uri=config.get('Git', r))
         repo.pull()
 
-#commit changed files and push to remote repository
-def gitPush():
-    logging.info('*** Versioning files and pushing to remote repository ***')
-    destinations = [dataDestination, PDFdestination]
-    remotes = ['dataRemote', 'PDFRemote']
-    for d, r in zip(destinations, remotes):
-        repo = Gittle(d, origin_uri=config.get('Git', r))
-        repo.stage(repo.pending_files)
-        repo.commit(message=commitMessage)
-        repo.push()
-
 def main():
     logging.info('=========================================')
     logging.info('*** Export started ***')
@@ -316,74 +231,17 @@ def main():
     findUpdatedResources(lastExport, headers)
     findUpdatedObjects(lastExport, headers)
     findUpdatedDigitalObjects(lastExport, headers)
-    if len(resourceExportList) > 0 or len(resourceDeleteList) or len(doExportList) > 0 or len(doDeleteList) > 0:
-        gitPush()
-    else:
-        logging.info('*** Nothing exported ***')
     logging.info('*** Export completed ***')
     updateTime(exportStartTime)
 
 checkPid(pidfilepath)
 makeDestinations()
-#gitPull()
 if len(sys.argv) >= 2:
     argument = sys.argv[1]
     if argument == '--update_time':
         logging.info('=========================================')
         exportStartTime = int(time.time())
         updateTime(exportStartTime)
-    elif argument == '--archival':
-        logging.info('=========================================')
-        logging.info('*** Export of finding aids started ***')
-        headers = authenticate()
-        findAllArchivalResources(headers)
-        if len(resourceExportList) > 0 or len(resourceDeleteList) > 0:
-            gitPush()
-        logging.info('*** Export of finding aids completed ***')
-    elif argument == '--library':
-        logging.info('=========================================')
-        logging.info('*** Export of library records started ***')
-        headers = authenticate()
-        findAllLibraryResources(headers)
-        if len(resourceExportList) > 0 or len(resourceDeleteList) > 0:
-            gitPush()
-        logging.info('*** Export of library records completed ***')
-    elif argument == '--digital':
-        if len(sys.argv) >= 3:
-            argument2 = sys.argv[2]
-            if argument2 == '--resource':
-                if len(sys.argv) == 4:
-                    resourceId = sys.argv[3]
-                    logging.info('=========================================')
-                    logging.info('*** Export of digital objects associated with %s started ***', resourceId)
-                    headers = authenticate()
-                    findAssociatedDigitalObjects(headers, resourceId)
-                    if len(doExportList) > 0 or len(doDeleteList) > 0:
-                        gitPush()
-                    logging.info('*** Export of associated digital objects completed ***')
-                else:
-                    print 'You forgot to specify a resource identifier!'
-            else:
-                print 'Unknown second argument "%s" for "%s", please try again'% (sys.argv[2], sys.argv[1])
-        else:
-            logging.info('=========================================')
-            logging.info('*** Export of digital objects started ***')
-            headers = authenticate()
-            findAllDigitalObjects(headers)
-            if len(doExportList) > 0 or len(doDeleteList) > 0:
-                gitPush()
-            logging.info('*** Export of digital objects completed ***')
-    elif argument == '--resource':
-        resourceId = sys.argv[2]
-        logging.info('=========================================')
-        logging.info('*** Export of resource records containing %s started ***', resourceId)
-        headers = authenticate()
-        findResource(headers, resourceId)
-        if len(resourceExportList) > 0:
-            gitPush()
-        logging.info('*** Export of finding aids completed ***')
-    else:
-        print 'Unknown argument, please try again'
 else:
     main()
 os.unlink(pidfilepath)
